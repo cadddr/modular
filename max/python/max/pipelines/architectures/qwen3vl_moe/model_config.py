@@ -22,7 +22,7 @@ from max.graph import DeviceRef
 from max.graph.weights import WeightData
 from max.nn import ReturnLogits
 from max.nn.kv_cache import KVCacheParams
-from max.pipelines.architectures.llama3.model_config import Llama3Config
+from max.pipelines.architectures.qwen3.model_config import Qwen3Config
 from max.pipelines.lib import KVCacheConfig, MAXModelConfig, PipelineConfig
 from transformers.models.auto.configuration_auto import AutoConfig
 
@@ -114,6 +114,36 @@ class VisionConfig:
 
 
 @dataclass
+class TextMoeConfigBase:
+    vocab_size: int = 151936
+    hidden_size: int = 2048
+    intermediate_size: int = 5632
+    num_hidden_layers: int = 24
+    num_attention_heads: int = 16
+    num_key_value_heads: int = 16
+    hidden_act: str = 'silu'
+    max_position_embeddings: int = 128000
+    initializer_range: float = 0.02
+    rms_norm_eps: float = 1e-06
+    use_cache: bool = True
+    tie_word_embeddings: bool = False
+    rope_theta: float = 5000000.0
+    attention_bias: bool = False
+    attention_dropout: float = 0.0
+    decoder_sparse_step: int = 1
+    moe_intermediate_size: int = 1408
+    num_experts_per_tok: int = 4
+    num_experts: int = 60
+    norm_topk_prob: bool = True
+    router_aux_loss_coef: float = 0.001
+    mlp_only_layers = None
+    rope_scaling = None
+    head_dim = None
+
+class TextMoeConfig(TextMoeConfigBase, Qwen3Config):
+    pass
+
+@dataclass
 class Qwen3VLConfigBase:
     """Base configuration for Qwen3VL models with required fields."""
 
@@ -141,8 +171,8 @@ class Qwen3VLConfigBase:
     """Vision encoder configuration."""
 
     # Composed language model configuration.
-    llm_config: Llama3Config
-    """Language model configuration using Llama3 architecture."""
+    llm_config: TextMoeConfig
+    """Language model configuration."""
 
 
 @dataclass
@@ -162,11 +192,11 @@ class Qwen3VLConfig(MAXModelConfig, Qwen3VLConfigBase):
         kv_cache_config: KVCacheConfig,
         cache_dtype: DType,
     ) -> KVCacheParams:
-        # Delegate to Llama3Config for language model parameters.
+        # Delegate to TextMoeConfig for language model parameters.
         llm_config = getattr(
             huggingface_config, "text_config", huggingface_config
         )
-        return Llama3Config.get_kv_params(
+        return TextMoeConfig.get_kv_params(
             huggingface_config=llm_config,
             n_devices=n_devices,
             kv_cache_config=kv_cache_config,
@@ -175,22 +205,22 @@ class Qwen3VLConfig(MAXModelConfig, Qwen3VLConfigBase):
 
     @staticmethod
     def get_num_layers(huggingface_config: AutoConfig) -> int:
-        # Delegate to Llama3Config for language model parameters.
+        # Delegate to TextMoeConfig for language model parameters.
         llm_config = getattr(
             huggingface_config, "text_config", huggingface_config
         )
-        return Llama3Config.get_num_layers(llm_config)
+        return TextMoeConfig.get_num_layers(llm_config)
 
     @staticmethod
     def calculate_max_seq_len(
         pipeline_config: PipelineConfig, huggingface_config: AutoConfig
     ) -> int:
         """Calculate maximum sequence length for Qwen3VL."""
-        # Delegate to Llama3Config for language model parameters.
+        # Delegate to TextMoeConfig for language model parameters.
         llm_config = getattr(
             huggingface_config, "text_config", huggingface_config
         )
-        return Llama3Config.calculate_max_seq_len(
+        return TextMoeConfig.calculate_max_seq_len(
             pipeline_config=pipeline_config,
             huggingface_config=llm_config,
         )
@@ -236,8 +266,8 @@ class Qwen3VLConfig(MAXModelConfig, Qwen3VLConfigBase):
             pipeline_config,
         )
 
-        # Create Llama3Config for the language model (with Qwen2 attention_bias=True)
-        llm_config = Llama3Config.generate(
+        # Create TextMoeConfig for the language model (with Qwen2 attention_bias=True)
+        llm_config = TextMoeConfig.generate(
             pipeline_config=pipeline_config,
             huggingface_config=huggingface_config.text_config,
             state_dict=llm_state_dict,

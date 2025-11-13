@@ -169,8 +169,7 @@ class Qwen3VLModel(
 
         self.model_config = None
 
-        # self.vision_model, self.language_model = self.load_model(session)
-        self.vision_model, _ = self.load_model(session)
+        self.vision_model, self.language_model = self.load_model(session)
         self._parallel_ops = ParallelArrayOps(max_workers=24)
 
     # TODO: Seems like a common pattern. Implement in a base class?
@@ -320,12 +319,14 @@ class Qwen3VLModel(
         )
         self.model_config = qwen3vl_config
 
-        # TODO: load weights into the model
         self.model: Module = Qwen3VL(self.model_config)
         # self.model.load_state_dict(model_state_dict, strict=True)
-        # For now, load weights into the vision model only.
         self.model.vision_encoder.load_state_dict(
             state_dict=vision_state_dict,
+            strict=True,
+        )
+        self.model.language_model.load_state_dict(
+            state_dict=llm_state_dict,
             strict=True,
         )
 
@@ -333,7 +334,7 @@ class Qwen3VLModel(
         logger.info("Building and compiling vision model...")
         before = time.perf_counter()
         vision_graph = self._build_vision_graph(
-            qwen3vl_config, vision_state_dict
+            qwen3vl_config, vision_state_dict # unused
         )
         after_build = time.perf_counter()
 
@@ -355,32 +356,30 @@ class Qwen3VLModel(
             f"Building and compiling vision model took {after - before:.6f} seconds"
         )
 
-        # TODO: Build and compile language model
-        language_model = None
-        # logger.info("Building and compiling language model...")
-        # before = time.perf_counter()
-        # language_graph, language_model_state_dict = self._build_language_graph(
-        #     qwen3vl_config, llm_state_dict
-        # )
-        # after_build = time.perf_counter()
+        logger.info("Building and compiling language model...")
+        before = time.perf_counter()
+        language_graph, language_model_state_dict = self._build_language_graph(
+            qwen3vl_config, llm_state_dict # unused also? simply return
+        )
+        after_build = time.perf_counter()
 
-        # logger.info(
-        #     f"Building language graph took {after_build - before:.6f} seconds"
-        # )
+        logger.info(
+            f"Building language graph took {after_build - before:.6f} seconds"
+        )
 
-        # before_compile = time.perf_counter()
-        # language_model = session.load(
-        #     language_graph, weights_registry=language_model_state_dict
-        # )
-        # after = time.perf_counter()
+        before_compile = time.perf_counter()
+        language_model = session.load(
+            language_graph, weights_registry=language_model_state_dict
+        )
+        after = time.perf_counter()
 
-        # logger.info(
-        #     f"Compiling language model took {after - before_compile:.6f} seconds"
-        # )
+        logger.info(
+            f"Compiling language model took {after - before_compile:.6f} seconds"
+        )
 
-        # logger.info(
-        #     f"Building and compiling language model took {after - before:.6f} seconds"
-        # )
+        logger.info(
+            f"Building and compiling language model took {after - before:.6f} seconds"
+        )
 
         return vision_model, language_model
 
@@ -609,16 +608,53 @@ class Qwen3VLModel(
         self, config: Qwen3VLConfig, state_dict: dict[str, WeightData]
     ) -> tuple[Graph, dict[str, Any]]:
         """Build the language model graph for text generation with image embeddings."""
-        # TODO: Implement Qwen3VLLanguageModel that handles image embeddings merging
-        # For now, this is a placeholder that will need to be completed
         # The language model should merge image embeddings with text embeddings
         # at image token positions, similar to how InternVL or Qwen2.5VL does it
 
-        raise NotImplementedError(
-            "Language model graph building for Qwen3VL is not yet implemented. "
-            "A Qwen3VLLanguageModel class that handles image embeddings merging "
-            "needs to be created first."
-        )
+        assert isinstance(self.model, Qwen3VL)
+        language_model = self.model.language_model
+        # Build the vision graph
+        with Graph(
+            "qwen3vl_text_moe",
+            input_types=self._language_graph_input_types()
+        ) as graph:
+            # Extract inputs
+            all_inputs = graph.inputs
+            n_devices = len(self.devices)
+
+            tokens, return_n_logits = all_inputs[:2]
+            all_inputs = all_inputs[2:]
+
+            input_row_offsets_list = [inp.tensor for inp in all_inputs[:n_devices]]
+            all_inputs = all_inputs[n_devices:]
+
+            image_embeddings_list = [inp.tensor for inp in all_inputs[:n_devices]]
+            all_inputs = all_inputs[n_devices:]
+
+            image_token_indices_list = [inp.tensor for inp in all_inputs[:n_devices]]
+            all_inputs = all_inputs[n_devices:]
+
+            position_ids = all_inputs.pop()
+
+            signal_buffers = [inp.buffer for inp in all_inputs[:n_devices]]
+            all_inputs = all_inputs[n_devices:]
+
+            flattened_kv_list = [inp.tensor for inp in all_inputs]
+
+            outputs: tuple[TensorValue, ...] = language_model(
+                tokens=tokens,
+                return_n_logits=return_n_logits,
+                input_row_offsets=input_row_offsets_list,
+                image_embeddings=image_embeddings_list,
+                image_token_indices=image_token_indices_list,
+                decoder_position_ids=position_ids,
+                signal_buffers=signal_buffers,
+                kv_cache_inputs=flattened_kv_list # why so flattened
+            )
+
+            graph.output(*outputs)
+            return graph, state_dict
+
 
     def execute(self, model_inputs: ModelInputs) -> ModelOutputs:
         """Executes the Qwen3VL model with the prepared inputs."""
@@ -652,6 +688,7 @@ class Qwen3VLModel(
             )
             assert len(vision_outputs) == len(self.devices)
 
+            # not collecting deepstack features?
             image_embeddings = [
                 output
                 for output in vision_outputs
@@ -682,7 +719,16 @@ class Qwen3VLModel(
 
         # Execute language model with text and image embeddings and deepstack features
         # TODO: Execute language model with text and image embeddings
-        language_outputs: list[Tensor] = []
+        language_outputs: list[Tensor] = self.language_model.execute(
+                *model_inputs.tokens, # TODO: ensure correct order
+                *model_inputs.return_n_logits,
+                *model_inputs.input_row_offsets,
+                *image_embeddings,
+                *image_token_indices,
+                *model_inputs.decoder_position_ids,
+                *model_inputs.signal_buffers,
+                *kv_cache_inputs_list
+        )
 
         # Return model outputs based on what the language model returns
         if len(language_outputs) == 3:
