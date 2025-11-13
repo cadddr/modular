@@ -22,13 +22,23 @@ from builtin.simd import _simd_construction_checks
 from memory import memcpy
 from memory.memory import _free, _malloc
 from memory.maybe_uninitialized import UnsafeMaybeUninitialized
-from memory import UnsafePointerV2
 from os import abort
 from python import PythonObject
 
 # ===----------------------------------------------------------------------=== #
 # LegacyUnsafePointer
 # ===----------------------------------------------------------------------=== #
+
+
+trait _IsUnsafePointer:
+    """A temporary helper trait for converting between LegacyUnsafePointer and
+    UnsafePointer in kernel code.
+
+    This trait is used by `_checked` functions to see if the argument can be
+    converted to it's associated kernel argument type.
+    """
+
+    alias _UnsafePointerType: AnyType
 
 
 @always_inline
@@ -54,12 +64,12 @@ struct LegacyUnsafePointer[
     Writable,
 ):
     """`LegacyUnsafePointer` is a deprecated pointer type that is replaced by
-    the new `UnsafePointerV2`. It is kept for backwards compatibility and will
+    the new `UnsafePointer`. It is kept for backwards compatibility and will
     be removed in a future version of Mojo.
 
     In the interim, you can implicitly convert between a `LegacyUnsafePointer`
-    and an `UnsafePointerV2`. This will allow you to pass a legacy pointer to an
-    `UnsafePointerV2` function, and vice versa.
+    and an `UnsafePointer`. This will allow you to pass a legacy pointer to an
+    `UnsafePointer` function, and vice versa.
 
     Parameters:
         type: The type the pointer points to.
@@ -71,6 +81,13 @@ struct LegacyUnsafePointer[
     # ===-------------------------------------------------------------------===#
     # Aliases
     # ===-------------------------------------------------------------------===#
+
+    alias _UnsafePointerType = UnsafePointer[
+        mut = Self.mut,
+        Self.type,
+        Self.origin,
+        address_space = Self.address_space,
+    ]
 
     # Fields
     alias _mlir_type = __mlir_type[
@@ -138,16 +155,29 @@ struct LegacyUnsafePointer[
     @always_inline("builtin")
     @implicit
     fn __init__(
-        out self, other: UnsafePointerV2[type, address_space=address_space, **_]
+        out self,
+        other: UnsafePointer[
+            mut=mut, type, origin, address_space=address_space
+        ],
     ):
-        """Implicitly cast an `UnsafePointerV2` to a `LegacyUnsafePointer`.
+        """Implicitly cast an `UnsafePointer` to a `LegacyUnsafePointer`.
 
         Args:
-            other: The `UnsafePointerV2` to cast from.
+            other: The `UnsafePointer` to cast from.
+        """
+        self.address = __mlir_op.`pop.pointer.bitcast`[_type = Self._mlir_type](
+            other.address
+        )
 
-        Returns:
-            A `LegacyUnsafePointer` with the same type, mutability, origin and
-            address space as the `UnsafePointerV2`.
+    @always_inline("builtin")
+    @implicit
+    fn __init__(
+        out self, other: UnsafePointer[type, address_space=address_space, **_]
+    ):
+        """Implicitly cast an `UnsafePointer` to a `LegacyUnsafePointer`.
+
+        Args:
+            other: The `UnsafePointer` to cast from.
         """
         self.address = __mlir_op.`pop.pointer.bitcast`[_type = Self._mlir_type](
             other.address
@@ -478,6 +508,19 @@ struct LegacyUnsafePointer[
     # ===-------------------------------------------------------------------===#
     # Methods
     # ===-------------------------------------------------------------------===#
+
+    @always_inline("builtin")
+    fn as_unsafe_pointer(
+        self,
+        out result: UnsafePointer[type, origin, address_space=address_space],
+    ):
+        """Explicitly cast this legacy pointer to an `UnsafePointer`.
+
+        Returns:
+            An `UnsafePointer` with the same type, mutability, origin, and
+            address space as the original pointer.
+        """
+        result = type_of(result)(self.address)
 
     @always_inline("nodebug")
     fn swap_pointees[
@@ -1438,3 +1481,7 @@ struct LegacyUnsafePointer[
 
 alias LegacyOpaquePointer = LegacyUnsafePointer[NoneType]
 """An opaque pointer, equivalent to the C `void*` type."""
+
+
+__extension LegacyUnsafePointer(_IsUnsafePointer):
+    pass
